@@ -1,53 +1,105 @@
+import os
 from playwright.sync_api import sync_playwright
+from dotenv import load_dotenv
 
-def fetch_latest_tweets_no_pinned(username, limit=10):
+load_dotenv()
+
+def login_and_fetch_tweets(search_url, limit=5):
+    username = os.getenv("TWITTER_USER")
+    password = os.getenv("TWITTER_PASS")
+
+    if not username or not password:
+        raise ValueError("Please set TWITTER_USER and TWITTER_PASS environment variables.")
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=False)  # Change to True when stable
         page = browser.new_page()
 
-        # Open Twitter profile
-        page.goto(f"https://twitter.com/{username}", timeout=60000)
+        print("[INFO] Opening Twitter login page...")
+        page.goto("https://twitter.com/login", timeout=60000)
 
-        # Wait until tweets load
-        page.wait_for_selector('article[data-testid="tweet"]', timeout=15000)
+        # STEP 1: Enter username
+        print("[INFO] Entering username...")
+        page.locator('input[name="text"]').fill(username)
+        page.wait_for_timeout(1000)  # Allow UI to update
 
-        # Grab all tweet articles (including pinned)
-        tweet_articles = page.query_selector_all('article[data-testid="tweet"]')
+        next_btn = page.locator('div[role="button"] >> text=/next/i')
+        if next_btn.is_visible():
+            next_btn.click()
+            print("[INFO] Clicked 'Next'")
+        else:
+            print("[WARN] 'Next' button not found — pressing Enter")
+            page.keyboard.press("Enter")
+        page.wait_for_timeout(2000)
 
-        tweets_cleaned = []
-        for article in tweet_articles:
-            # Skip pinned tweets
-            if article.query_selector('svg[aria-label="Pinned Tweet"]'):
+        # STEP 2: Optional phone/email verification
+        if page.locator('input[name="text"]').is_visible():
+            print("[INFO] Verification step detected...")
+            page.locator('input[name="text"]').fill(username)
+            page.wait_for_timeout(1000)
+            verify_btn = page.locator('div[role="button"] >> text=/next/i')
+            if verify_btn.is_visible():
+                verify_btn.click()
+                print("[INFO] Clicked verification 'Next'")
+            else:
+                print("[WARN] Verification button not found — pressing Enter")
+                page.keyboard.press("Enter")
+            page.wait_for_timeout(2000)
+
+        # STEP 3: Enter password
+        print("[INFO] Entering password...")
+        page.locator('input[name="password"]').fill(password)
+        page.wait_for_timeout(500)
+        login_btn = page.locator('div[role="button"] >> text=/log in/i')
+        if login_btn.is_visible():
+            login_btn.click()
+            print("[INFO] Clicked 'Log in'")
+        else:
+            print("[WARN] 'Log in' button not found — pressing Enter")
+            page.keyboard.press("Enter")
+        page.wait_for_timeout(5000)
+
+        # STEP 4: Navigate to search URL
+        print("[INFO] Navigating to search page...")
+        page.goto(search_url, timeout=60000, wait_until="networkidle")
+
+        # STEP 5: Wait for tweets to load
+        page.wait_for_selector('article[data-testid="tweet"]', timeout=30000)
+
+        # STEP 6: Extract tweets
+        tweets = []
+        for article in page.locator('article[data-testid="tweet"]').all():
+            if article.locator('svg[aria-label="Pinned Tweet"]').count() > 0:
                 continue
 
-            # Extract tweet text
-            tweet_text_divs = article.query_selector_all('div[data-testid="tweetText"]')
-            text_parts = [div.inner_text().strip() for div in tweet_text_divs]
+            text_parts = [div.inner_text().strip()
+                          for div in article.locator('div[data-testid="tweetText"]').all()]
             full_text = " ".join(text_parts)
 
-            # Extract timestamp
-            time_tag = article.query_selector('time')
-            timestamp = time_tag.get_attribute("datetime") if time_tag else None
+            timestamp = None
+            if article.locator('time').count() > 0:
+                timestamp = article.locator('time').get_attribute("datetime")
 
-            # Extract tweet link
-            link_tag = article.query_selector('a[role="link"][href*="/status/"]')
-            tweet_link = f"https://twitter.com{link_tag.get_attribute('href')}" if link_tag else None
+            link = None
+            if article.locator('a[role="link"][href*="/status/"]').count() > 0:
+                link = "https://twitter.com" + article.locator(
+                    'a[role="link"][href*="/status/"]').first.get_attribute('href')
 
-            tweets_cleaned.append({
+            tweets.append({
                 "text": full_text,
                 "timestamp": timestamp,
-                "link": tweet_link
+                "link": link
             })
 
-            if len(tweets_cleaned) >= limit:
+            if len(tweets) >= limit:
                 break
 
         browser.close()
-        return tweets_cleaned
+        return tweets
 
 
 if __name__ == "__main__":
-    username = "elonmusk"
-    tweets = fetch_latest_tweets_no_pinned(username, limit=5)
-    for t in tweets:
+    SEARCH_URL = "https://twitter.com/search?q=from%3Aelonmusk&src=typed_query&f=live"
+    results = login_and_fetch_tweets(SEARCH_URL, limit=5)
+    for t in results:
         print(f"[{t['timestamp']}] {t['text']}\nLink: {t['link']}\n")
